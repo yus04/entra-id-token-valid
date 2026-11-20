@@ -17,7 +17,7 @@
       <pre>{{ result.id_token }}</pre>
       <h2>ID トークンのクレーム（MSAL による検証済み）</h2>
       <pre>{{ result.id_token_claims | tojson(indent=2) }}</pre>
-      <h2>アクセストークン（Microsoft Graph / User.Read）</h2>
+      <h2>アクセストークン</h2>
       <pre>{{ result.get('access_token', 'アクセストークンは返されませんでした。') }}</pre>
       <p>アクセストークンは JWT とは限りません。そのままの値を表示しています。</p>
     {% endif %}

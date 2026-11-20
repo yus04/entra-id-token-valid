@@ -1,5 +1,6 @@
 import unittest
 from unittest.mock import patch
+from urllib.parse import urlsplit
 
 import requests
 
@@ -8,16 +9,23 @@ from app import create_app
 
 class AuthFlowTests(unittest.TestCase):
     def setUp(self):
-        self.app = create_app(
+        environment = patch.dict(
+            "os.environ",
             {
-                "TESTING": True,
-                "SECRET_KEY": "test-session-signing-key",
-                "TENANT_ID": "test-tenant",
-                "CLIENT_ID": "test-client",
-                "CLIENT_SECRET": "test-client-secret",
-                "REDIRECT_URI": "http://localhost:5000/auth/callback",
-            }
+                "FLASK_SECRET_KEY": "test-session-signing-key",
+                "ENTRA_TENANT_ID": "test-tenant",
+                "ENTRA_CLIENT_ID": "test-client",
+                "ENTRA_CLIENT_SECRET": "test-client-secret",
+                "ENTRA_REDIRECT_URI": "http://localhost:5000/auth/callback",
+            },
+            clear=True,
         )
+        environment.start()
+        self.addCleanup(environment.stop)
+        dotenv = patch("app.load_dotenv")
+        dotenv.start()
+        self.addCleanup(dotenv.stop)
+        self.app = create_app({"TESTING": True})
         self.client = self.app.test_client()
         patcher = patch("app.msal.ConfidentialClientApplication")
         self.identity_factory = patcher.start()
@@ -84,6 +92,66 @@ class AuthFlowTests(unittest.TestCase):
         )
         with self.client.session_transaction() as session:
             self.assertEqual(session["auth_flow"], self.flow)
+
+    def test_external_id_authority_and_signin_only_scopes(self):
+        authority = "https://example.ciamlogin.com/test-external-tenant"
+        with patch.dict(
+            "os.environ", {"ENTRA_AUTHORITY": authority, "ENTRA_SCOPES": ""}
+        ):
+            app = create_app({"TESTING": True})
+
+        response = app.test_client().get("/login")
+
+        self.assertEqual(response.status_code, 302)
+        self.identity_factory.assert_called_once_with(
+            "test-client",
+            authority=authority,
+            client_credential="test-client-secret",
+        )
+        self.identity.initiate_auth_code_flow.assert_called_once_with(
+            scopes=[],
+            redirect_uri="http://localhost:5000/auth/callback",
+            response_mode="query",
+        )
+
+    def test_signing_key_preserves_session_across_app_restart(self):
+        self.identity.acquire_token_by_auth_code_flow.return_value = {
+            "id_token": "example-id-token",
+            "id_token_claims": {"roles": ["Example.Reader"]},
+        }
+        for origin in ("http://localhost:5000", "https://private-forward.example"):
+            with self.subTest(origin=origin), patch.dict(
+                "os.environ", {"ENTRA_REDIRECT_URI": origin + "/auth/callback"}
+            ):
+                first_app = create_app({"TESTING": True})
+                first_client = first_app.test_client()
+                login = first_client.get("/login", base_url=origin)
+                cookie_header = login.headers["Set-Cookie"]
+                self.assertEqual("Secure;" in cookie_header, origin.startswith("https:"))
+                self.assertIn("HttpOnly;", cookie_header)
+                self.assertIn("SameSite=Lax", cookie_header)
+                cookie = first_client.get_cookie(
+                    "session", domain=urlsplit(origin).hostname
+                )
+                self.assertIsNotNone(cookie)
+
+                restarted_app = create_app({"TESTING": True})
+                restarted_client = restarted_app.test_client()
+                restarted_client.set_cookie(
+                    "session", cookie.value, domain=urlsplit(origin).hostname
+                )
+                response = restarted_client.get(
+                    "/auth/callback?code=test-code&state=test-state", base_url=origin
+                )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertIn(b"example-id-token", response.data)
+                self.assertIn(b"Example.Reader", response.data)
+                self.assertIsNone(
+                    restarted_client.get_cookie(
+                        "session", domain=urlsplit(origin).hostname
+                    )
+                )
 
     def test_callback_displays_tokens_without_persisting_them(self):
         self.start_flow()
@@ -186,8 +254,27 @@ class AuthFlowTests(unittest.TestCase):
         self.assertNotIn(b"example-access-token", response.data)
 
     def test_missing_configuration_fails_at_startup(self):
-        with self.assertRaisesRegex(RuntimeError, "ENTRA_CLIENT_SECRET"):
-            create_app({"CLIENT_SECRET": ""})
+        for config_name, environment_name in (
+            ("SECRET_KEY", "FLASK_SECRET_KEY"),
+            ("TENANT_ID", "ENTRA_TENANT_ID"),
+            ("CLIENT_ID", "ENTRA_CLIENT_ID"),
+            ("CLIENT_SECRET", "ENTRA_CLIENT_SECRET"),
+            ("REDIRECT_URI", "ENTRA_REDIRECT_URI"),
+        ):
+            with self.subTest(setting=config_name):
+                with self.assertRaisesRegex(RuntimeError, environment_name):
+                    create_app({config_name: ""})
+
+    def test_redirect_uri_requires_https_except_on_loopback(self):
+        for uri in (
+            "http://private-forward.example/auth/callback",
+            "/auth/callback",
+            "https:///auth/callback",
+            "https://example.com/auth/callback#fragment",
+        ):
+            with self.subTest(uri=uri):
+                with self.assertRaisesRegex(RuntimeError, "ENTRA_REDIRECT_URI"):
+                    create_app({"REDIRECT_URI": uri})
 
 
 if __name__ == "__main__":
