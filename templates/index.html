@@ -3,13 +3,32 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Entra ID トークン確認</title>
+    <title>Entra ID / External ID トークン確認</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   </head>
   <body>
-    <h1>Entra ID トークン確認</h1>
-    <p>Entra ID でサインインし、受け取ったトークンを表示します。</p>
+    <h1>Entra ID / External ID トークン確認</h1>
+    <p>認証経路を選択し、受け取ったトークンを表示します。</p>
     <p>ローカルでの動作確認専用です。トークンには機密情報が含まれます。</p>
-    <a class="auth-button" href="{{ url_for('login') }}" target="_top">Entra ID で認証</a>
+    <section>
+      <h2>Entra ID への直接認証</h2>
+      <p>Web アプリ → 社内 Entra ID → Web アプリ</p>
+      {% if entra_enabled %}
+        <a class="auth-button" href="{{ login_uri }}/entra" target="_top">Entra ID で認証</a>
+      {% else %}
+        <button type="button" disabled>Entra ID で認証</button>
+        <p>未設定です。.env の ENTRA_* に社内テナントのアプリ登録を設定してください。</p>
+      {% endif %}
+    </section>
+    <section>
+      <h2>External ID 経由のフェデレーション認証</h2>
+      <p>Web アプリ → External ID のユーザーフロー → 社内 Entra ID → External ID → Web アプリ</p>
+      {% if external_enabled %}
+        <a class="auth-button" href="{{ login_uri }}/external" target="_top">External ID で認証</a>
+      {% else %}
+        <button type="button" disabled>External ID で認証</button>
+        <p>未設定です。.env の EXTERNAL_ID_* に顧客テナントのアプリ登録を設定してください。</p>
+      {% endif %}
+    </section>
   </body>
 </html>
