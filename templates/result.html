@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Entra ID 認証結果</title>
+  </head>
+  <body>
+    {% if error %}
+      <h1>認証エラー</h1>
+      <p role="alert">{{ error }}</p>
+    {% else %}
+      <h1>受け取ったトークン</h1>
+      <p>トークンは秘密情報です。コピーやスクリーンショットを共有しないでください。</p>
+      <p>再読み込みすると認証し直す必要があります。</p>
+      <h2>ID トークン</h2>
+      <pre>{{ result.id_token }}</pre>
+      <h2>ID トークンのクレーム（MSAL による検証済み）</h2>
+      <pre>{{ result.id_token_claims | tojson(indent=2) }}</pre>
+      <h2>アクセストークン（Microsoft Graph / User.Read）</h2>
+      <pre>{{ result.get('access_token', 'アクセストークンは返されませんでした。') }}</pre>
+      <p>アクセストークンは JWT とは限りません。そのままの値を表示しています。</p>
+    {% endif %}
+    <p><a href="{{ url_for('index') }}">最初に戻る</a></p>
+  </body>
+</html>
