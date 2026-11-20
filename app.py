@@ -1,5 +1,5 @@
 import os
-import secrets
+from urllib.parse import urlsplit
 
 import msal
 import requests
@@ -11,13 +11,13 @@ def create_app(test_config=None):
     load_dotenv()
     app = Flask(__name__)
     app.config.from_mapping(
-        SECRET_KEY=secrets.token_hex(32),
+        SECRET_KEY=os.getenv("FLASK_SECRET_KEY"),
         TENANT_ID=os.getenv("ENTRA_TENANT_ID"),
         CLIENT_ID=os.getenv("ENTRA_CLIENT_ID"),
         CLIENT_SECRET=os.getenv("ENTRA_CLIENT_SECRET"),
-        REDIRECT_URI=os.getenv(
-            "ENTRA_REDIRECT_URI", "http://localhost:5000/auth/callback"
-        ),
+        REDIRECT_URI=os.getenv("ENTRA_REDIRECT_URI"),
+        AUTHORITY=os.getenv("ENTRA_AUTHORITY"),
+        SCOPES=os.getenv("ENTRA_SCOPES", "User.Read").split(),
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
     )
@@ -25,17 +25,44 @@ def create_app(test_config=None):
         app.config.update(test_config)
 
     missing = [
-        f"ENTRA_{name}"
-        for name in ("TENANT_ID", "CLIENT_ID", "CLIENT_SECRET")
-        if not app.config[name]
+        environment_name
+        for config_name, environment_name in (
+            ("SECRET_KEY", "FLASK_SECRET_KEY"),
+            ("TENANT_ID", "ENTRA_TENANT_ID"),
+            ("CLIENT_ID", "ENTRA_CLIENT_ID"),
+            ("CLIENT_SECRET", "ENTRA_CLIENT_SECRET"),
+            ("REDIRECT_URI", "ENTRA_REDIRECT_URI"),
+        )
+        if not app.config[config_name]
     ]
     if missing:
         raise RuntimeError(f"Missing environment variables: {', '.join(missing)}")
 
+    callback_url = urlsplit(app.config["REDIRECT_URI"])
+    if (
+        not callback_url.hostname
+        or callback_url.username is not None
+        or callback_url.password is not None
+        or callback_url.query
+        or callback_url.fragment
+        or not (
+            callback_url.scheme == "https"
+            or (
+                callback_url.scheme == "http"
+                and callback_url.hostname in ("localhost", "127.0.0.1", "::1")
+            )
+        )
+    ):
+        raise RuntimeError(
+            "ENTRA_REDIRECT_URI must be an absolute HTTPS URL without "
+            "credentials, query or fragment (HTTP is allowed only on loopback)."
+        )
+    app.config["SESSION_COOKIE_SECURE"] = callback_url.scheme == "https"
+
     def identity_client():
         return msal.ConfidentialClientApplication(
             app.config["CLIENT_ID"],
-            authority=(
+            authority=app.config["AUTHORITY"] or (
                 "https://login.microsoftonline.com/"
                 f"{app.config['TENANT_ID']}"
             ),
@@ -66,14 +93,17 @@ def create_app(test_config=None):
         session.clear()
         try:
             flow = identity_client().initiate_auth_code_flow(
-                scopes=["User.Read"],
+                scopes=app.config["SCOPES"],
                 redirect_uri=app.config["REDIRECT_URI"],
                 response_mode="query",
             )
         except requests.RequestException:
             return error_page("Entra ID に接続できません。接続を確認してください。", 502)
         except ValueError:
-            return error_page("Entra ID のテナント ID・アプリ登録設定を確認してください。", 502)
+            return error_page(
+                "Entra ID のテナント ID・Authority・アプリ登録設定を確認してください。",
+                502,
+            )
 
         if "auth_uri" not in flow:
             return error_page("認証 URL を取得できませんでした。", 502)
@@ -84,7 +114,11 @@ def create_app(test_config=None):
     def callback():
         flow = session.pop("auth_flow", None)
         if flow is None:
-            return error_page("認証セッションがありません。最初から認証してください。", 400)
+            return error_page(
+                "認証セッションがありません。認証開始時と同じホスト名で開き、"
+                "Cookie と FLASK_SECRET_KEY の設定を確認して、最初から認証してください。",
+                400,
+            )
 
         try:
             result = identity_client().acquire_token_by_auth_code_flow(
