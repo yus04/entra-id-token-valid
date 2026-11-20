@@ -15,6 +15,7 @@ class AuthFlowTests(unittest.TestCase):
                 "TENANT_ID": "test-tenant",
                 "CLIENT_ID": "test-client",
                 "CLIENT_SECRET": "test-client-secret",
+                "REDIRECT_URI": "http://localhost:5000/auth/callback",
             }
         )
         self.client = self.app.test_client()
@@ -34,12 +35,37 @@ class AuthFlowTests(unittest.TestCase):
         with self.client.session_transaction() as session:
             session["auth_flow"] = self.flow
 
-    def test_home_has_authentication_button(self):
+    def test_home_starts_authentication_with_top_level_link_not_form(self):
         response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b'action="/login"', response.data)
+        self.assertRegex(
+            response.get_data(as_text=True),
+            r'<a\b[^>]*href="/login"[^>]*target="_top"',
+        )
+        self.assertNotIn(b"<form", response.data)
         self.identity_factory.assert_not_called()
+
+    def test_forwarded_redirect_uri_is_used_for_authentication(self):
+        callback_uri = "https://private-forward.example/auth/callback"
+        with patch.dict("os.environ", {"ENTRA_REDIRECT_URI": callback_uri}):
+            app = create_app(
+                {
+                    "TESTING": True,
+                    "TENANT_ID": "test-tenant",
+                    "CLIENT_ID": "test-client",
+                    "CLIENT_SECRET": "test-client-secret",
+                }
+            )
+
+        response = app.test_client().get("/login")
+
+        self.assertEqual(response.status_code, 302)
+        self.identity.initiate_auth_code_flow.assert_called_once_with(
+            scopes=["User.Read"],
+            redirect_uri=callback_uri,
+            response_mode="query",
+        )
 
     def test_login_redirects_and_preserves_flow(self):
         response = self.client.get("/login")

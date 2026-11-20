@@ -1,0 +1,9 @@
+.auth-button {
+  display: inline-block;
+  padding: 0.4em 0.8em;
+  border: 1px solid ButtonText;
+  border-radius: 2px;
+  background: ButtonFace;
+  color: ButtonText;
+  text-decoration: none;
+}

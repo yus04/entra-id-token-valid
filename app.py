@@ -15,7 +15,9 @@ def create_app(test_config=None):
         TENANT_ID=os.getenv("ENTRA_TENANT_ID"),
         CLIENT_ID=os.getenv("ENTRA_CLIENT_ID"),
         CLIENT_SECRET=os.getenv("ENTRA_CLIENT_SECRET"),
-        REDIRECT_URI="http://localhost:5000/auth/callback",
+        REDIRECT_URI=os.getenv(
+            "ENTRA_REDIRECT_URI", "http://localhost:5000/auth/callback"
+        ),
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
     )
@@ -50,8 +52,8 @@ def create_app(test_config=None):
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Content-Security-Policy"] = (
-            "default-src 'none'; form-action 'self'; frame-ancestors 'none'; "
-            "base-uri 'none'"
+            "default-src 'none'; style-src 'self'; form-action 'self'; "
+            "frame-ancestors 'none'; base-uri 'none'"
         )
         return response
 
