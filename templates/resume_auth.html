@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>認証 Cookie の確認</title>
+    <script src="{{ url_for('static', filename='resume-auth.js') }}" defer></script>
+  </head>
+  <body>
+    <h1>認証 Cookie を再確認しています</h1>
+    <p>画面が切り替わらない場合は、以下のリンクを押してください。</p>
+    <p><a id="resume-auth" href="{{ retry_url }}" target="_top">認証結果を表示</a></p>
+  </body>
+</html>

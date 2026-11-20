@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Entra ID 認証結果</title>
+    <title>Entra ID / External ID 認証結果</title>
   </head>
   <body>
     {% if error %}
@@ -11,6 +11,7 @@
       <p role="alert">{{ error }}</p>
     {% else %}
       <h1>受け取ったトークン</h1>
+      <p>認証経路：{{ provider_label }}</p>
       <p>トークンは秘密情報です。コピーやスクリーンショットを共有しないでください。</p>
       <p>再読み込みすると認証し直す必要があります。</p>
       <h2>ID トークン</h2>
