@@ -186,6 +186,7 @@ def create_app(test_config=None):
                 scopes=settings["scopes"],
                 redirect_uri=app.config["REDIRECT_URI"],
                 response_mode="query",
+                prompt="login",
             )
         except requests.RequestException:
             return error_page("Entra ID に接続できません。接続を確認してください。", 502)
