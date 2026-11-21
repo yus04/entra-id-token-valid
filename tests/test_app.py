@@ -1,8 +1,9 @@
-from html import unescape
+import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.parse import urlsplit
 
+import msal
 import requests
 
 from app import create_app
@@ -32,6 +33,7 @@ class AuthFlowTests(unittest.TestCase):
         self.addCleanup(dotenv.stop)
         self.app = create_app({"TESTING": True, "SERVER_NAME": "localhost:5000"})
         self.client = self.app.test_client()
+        self.real_identity_factory = msal.ConfidentialClientApplication
         patcher = patch("app.msal.ConfidentialClientApplication")
         self.identity_factory = patcher.start()
         self.addCleanup(patcher.stop)
@@ -77,27 +79,22 @@ class AuthFlowTests(unittest.TestCase):
             )
 
         response = app.test_client().get(
-            "/login/start", base_url="https://private-forward.example"
+            "/login/entra", base_url="https://private-forward.example"
         )
 
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(
-            response.location, "https://private-forward.example/login/continue"
-        )
+        self.assertEqual(response.location, self.flow["auth_uri"])
         self.identity.initiate_auth_code_flow.assert_called_once_with(
             scopes=["User.Read"],
             redirect_uri=callback_uri,
             response_mode="query",
         )
 
-    def test_login_redirects_and_preserves_flow(self):
-        response = self.client.get("/login/start")
+    def test_login_redirects_directly_and_preserves_flow(self):
+        response = self.client.get("/login/entra")
 
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.location, "http://localhost:5000/login/continue")
-        continuation = self.client.get(response.location)
-        self.assertEqual(continuation.status_code, 302)
-        self.assertEqual(continuation.location, self.flow["auth_uri"])
+        self.assertEqual(response.location, self.flow["auth_uri"])
         self.identity_factory.assert_called_once_with(
             "test-client",
             authority="https://login.microsoftonline.com/test-tenant",
@@ -113,9 +110,10 @@ class AuthFlowTests(unittest.TestCase):
             self.assertEqual(session["auth_provider"], "entra")
 
     def test_external_id_authority_and_signin_only_scopes(self):
-        response = self.client.get("/login/external/start")
+        response = self.client.get("/login/external")
 
         self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, self.flow["auth_uri"])
         self.identity_factory.assert_called_once_with(
             "external-client",
             authority="https://external-example.ciamlogin.com/external-tenant",
@@ -130,7 +128,7 @@ class AuthFlowTests(unittest.TestCase):
             self.assertEqual(session["auth_provider"], "external")
 
     def test_external_callback_uses_saved_provider_not_query_parameter(self):
-        self.client.get("/login/external/start")
+        self.client.get("/login/external")
         self.identity_factory.reset_mock()
         self.identity.acquire_token_by_auth_code_flow.return_value = {
             "id_token": "external-id-token",
@@ -159,7 +157,7 @@ class AuthFlowTests(unittest.TestCase):
         ):
             app = create_app({"TESTING": True, "SERVER_NAME": "localhost:5000"})
 
-        app.test_client().get("/login/external/start")
+        app.test_client().get("/login/external")
 
         self.identity.initiate_auth_code_flow.assert_called_once_with(
             scopes=["api://external-api/read"],
@@ -181,7 +179,7 @@ class AuthFlowTests(unittest.TestCase):
         client = app.test_client()
 
         home = client.get("/")
-        response = client.get("/login/external/start")
+        response = client.get("/login/external")
 
         self.assertIn(
             '<button type="button" disabled>External ID で認証</button>',
@@ -204,8 +202,8 @@ class AuthFlowTests(unittest.TestCase):
         client = app.test_client()
 
         home = client.get("/")
-        direct = client.get("/login/entra/start")
-        external = client.get("/login/external/start")
+        direct = client.get("/login/entra")
+        external = client.get("/login/external")
 
         self.assertIn(
             '<button type="button" disabled>Entra ID で認証</button>',
@@ -233,7 +231,6 @@ class AuthFlowTests(unittest.TestCase):
 
     def test_unknown_provider_is_rejected(self):
         self.assertEqual(self.client.get("/login/unknown").status_code, 404)
-        self.assertEqual(self.client.get("/login/unknown/start").status_code, 404)
         self.identity_factory.assert_not_called()
 
     def test_signing_key_preserves_session_across_app_restart(self):
@@ -247,7 +244,7 @@ class AuthFlowTests(unittest.TestCase):
             ):
                 first_app = create_app({"TESTING": True})
                 first_client = first_app.test_client()
-                login = first_client.get("/login/start", base_url=origin)
+                login = first_client.get("/login/entra", base_url=origin)
                 cookie_header = login.headers["Set-Cookie"]
                 self.assertEqual("Secure;" in cookie_header, origin.startswith("https:"))
                 self.assertIn("HttpOnly;", cookie_header)
@@ -307,24 +304,66 @@ class AuthFlowTests(unittest.TestCase):
         )
         self.identity.acquire_token_by_auth_code_flow.assert_called_once()
 
-    def test_callback_without_session_is_rejected(self):
-        response = self.client.get("/auth/callback?code=test-code")
+    def test_missing_or_invalid_session_shows_only_a_generic_error(self):
+        for cookie in (None, "invalid-signed-cookie"):
+            with self.subTest(cookie=cookie):
+                client = self.app.test_client()
+                if cookie is not None:
+                    client.set_cookie(self.app.config["SESSION_COOKIE_NAME"], cookie)
 
-        self.assertEqual(response.status_code, 400)
-        self.identity_factory.assert_not_called()
-
-    def test_callback_rejects_invalid_state_without_consuming_flow(self):
-        self.start_flow()
-
-        for state in ("incorrect", "", "\u3042"):
-            with self.subTest(state=state):
-                response = self.client.get(
-                    "/auth/callback", query_string={"state": state}
+                response = client.get(
+                    "/auth/callback?code=test-code&state=test-state"
                 )
+
                 self.assertEqual(response.status_code, 400)
+                self.assertIn(
+                    "最初の画面の認証ボタンから、もう一度サインインしてください。",
+                    response.get_data(as_text=True),
+                )
+                self.assertNotIn(b"Cookie", response.data)
+                self.assertNotIn(b"cookie_retry", response.data)
+                self.assertNotIn(b"<script", response.data)
+                self.assertEqual(response.headers["Cache-Control"], "no-store")
         self.identity_factory.assert_not_called()
-        with self.client.session_transaction() as session:
-            self.assertEqual(session["auth_flow"], self.flow)
+
+    def test_msal_rejects_invalid_state_before_token_exchange(self):
+        authority = "https://external-example.ciamlogin.com/external-tenant"
+        metadata = requests.Response()
+        metadata.status_code = 200
+        metadata._content = json.dumps(
+            {
+                "authorization_endpoint": authority + "/oauth2/v2.0/authorize",
+                "token_endpoint": authority + "/oauth2/v2.0/token",
+                "issuer": authority + "/v2.0",
+            }
+        ).encode()
+        http = Mock()
+        http.get.return_value = metadata
+        identity = self.real_identity_factory(
+            "external-client",
+            authority=authority,
+            client_credential="external-secret",
+            http_client=http,
+        )
+        flow = identity.initiate_auth_code_flow(
+            scopes=[], redirect_uri=self.app.config["REDIRECT_URI"]
+        )
+        self.identity_factory.return_value = identity
+        for state in ("incorrect", ""):
+            with self.subTest(state=state):
+                with self.client.session_transaction() as session:
+                    session["auth_flow"] = flow
+                    session["auth_provider"] = "external"
+
+                response = self.client.get(
+                    "/auth/callback",
+                    query_string={"state": state, "code": "test-code"},
+                )
+
+                self.assertEqual(response.status_code, 400)
+                with self.client.session_transaction() as session:
+                    self.assertEqual(dict(session), {})
+        http.post.assert_not_called()
 
     def test_callback_rejects_failed_msal_verification(self):
         self.start_flow()
@@ -338,15 +377,18 @@ class AuthFlowTests(unittest.TestCase):
         with self.client.session_transaction() as session:
             self.assertNotIn("auth_flow", session)
 
-    def test_login_normalizes_host_before_creating_session(self):
-        response = self.client.get("/login", base_url="http://127.0.0.1:5000")
+    def test_legacy_login_starts_direct_entra_authentication(self):
+        response = self.client.get("/login")
 
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.location, "http://localhost:5000/login/entra/start")
-        self.assertNotIn("Set-Cookie", response.headers)
-        self.identity_factory.assert_not_called()
+        self.assertEqual(response.location, self.flow["auth_uri"])
+        self.identity_factory.assert_called_once_with(
+            "test-client",
+            authority="https://login.microsoftonline.com/test-tenant",
+            client_credential="test-client-secret",
+        )
 
-    def test_https_proxy_does_not_cause_a_canonical_redirect_loop(self):
+    def test_https_proxy_login_redirects_directly_to_provider(self):
         app = create_app(
             {
                 "TESTING": True,
@@ -354,89 +396,11 @@ class AuthFlowTests(unittest.TestCase):
             }
         )
         client = app.test_client()
-        login = client.get("/login", base_url="http://internal-proxy:5000")
+        login = client.get("/login/entra", base_url="http://internal-proxy:5000")
 
-        self.assertEqual(login.location, "https://private-forward.example/login/entra/start")
-        start = client.get(
-            "/login/start",
-            base_url="http://internal-proxy:5000",
-        )
-        self.assertEqual(
-            start.location, "https://private-forward.example/login/continue"
-        )
+        self.assertEqual(login.location, self.flow["auth_uri"])
+        self.assertIn("Secure;", login.headers["Set-Cookie"])
         self.identity.initiate_auth_code_flow.assert_called_once()
-
-    def test_other_flask_session_cookie_does_not_overwrite_authentication(self):
-        self.client.get("/login/start")
-        self.client.set_cookie("session", "another-flask-application-session")
-
-        response = self.client.get("/login/continue")
-
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.location, self.flow["auth_uri"])
-
-    def test_login_stops_before_provider_if_cookie_is_not_returned(self):
-        self.client.get("/login/start")
-        self.client.delete_cookie(self.app.config["SESSION_COOKIE_NAME"])
-
-        with self.assertLogs(self.app.logger, level="WARNING") as logs:
-            response = self.client.get("/login/continue")
-
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("cookie_not_sent", logs.output[0])
-        self.assertNotIn("Location", response.headers)
-
-    def test_callback_recovers_cookie_withheld_on_cross_site_navigation(self):
-        self.client.get("/login/start")
-        unrelated_client = self.app.test_client()
-        response = unrelated_client.get(
-            "/auth/callback?code=test-code&state=test-state"
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertIn(b"resume-auth.js", response.data)
-        self.assertNotIn("Set-Cookie", response.headers)
-        self.assertEqual(response.headers["Cache-Control"], "no-store")
-        self.identity.acquire_token_by_auth_code_flow.assert_not_called()
-        html = response.get_data(as_text=True)
-        retry_url = unescape(html.split('id="resume-auth" href="')[1].split('"')[0])
-        self.assertIn("_cookie_retry=1", retry_url)
-        self.identity.acquire_token_by_auth_code_flow.return_value = {
-            "id_token": "example-id-token",
-            "id_token_claims": {"name": "Example User"},
-        }
-
-        result = self.client.get(retry_url)
-
-        self.assertEqual(result.status_code, 200)
-        self.assertIn(b"example-id-token", result.data)
-        self.identity.acquire_token_by_auth_code_flow.assert_called_once_with(
-            self.flow, {"code": "test-code", "state": "test-state"}
-        )
-
-    def test_callback_without_cookie_cannot_retry_forever_or_authenticate(self):
-        response = self.client.get(
-            "/auth/callback?code=test-code&state=test-state&_cookie_retry=1"
-        )
-
-        self.assertEqual(response.status_code, 400)
-        self.assertNotIn(b"resume-auth.js", response.data)
-        self.identity_factory.assert_not_called()
-
-    def test_invalid_cookie_is_distinguished_from_missing_cookie(self):
-        self.client.set_cookie(
-            self.app.config["SESSION_COOKIE_NAME"], "invalid-signed-cookie"
-        )
-
-        with self.assertLogs(self.app.logger, level="WARNING") as logs:
-            response = self.client.get(
-                "/auth/callback?code=test-code&state=test-state&_cookie_retry=1"
-            )
-
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("invalid_cookie", logs.output[0])
-        self.assertNotIn("invalid-signed-cookie", "".join(logs.output))
-        self.assertNotIn("test-code", "".join(logs.output))
 
     def test_denied_consent_is_displayed_and_escaped(self):
         self.start_flow()
@@ -472,7 +436,7 @@ class AuthFlowTests(unittest.TestCase):
             with self.subTest(error=type(error).__name__):
                 self.identity.initiate_auth_code_flow.side_effect = error
 
-                response = self.client.get("/login/start")
+                response = self.client.get("/login/entra")
 
                 self.assertEqual(response.status_code, 502)
                 with self.client.session_transaction() as session:

@@ -1,13 +1,11 @@
-import hashlib
 import os
 import re
-import secrets
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import urlsplit
 
 import msal
 import requests
 from dotenv import load_dotenv
-from flask import Flask, redirect, render_template, request, session, url_for
+from flask import Flask, redirect, render_template, request, session
 
 
 def create_app(test_config=None):
@@ -134,13 +132,6 @@ def create_app(test_config=None):
             "credentials, query or fragment (HTTP is allowed only on loopback)."
         )
     app.config["SESSION_COOKIE_SECURE"] = callback_url.scheme == "https"
-    cookie_scope = (
-        f"{app.config['CLIENT_ID']}:{app.config['EXTERNAL_ID_CLIENT_ID']}:"
-        f"{app.config['REDIRECT_URI']}"
-    )
-    app.config["SESSION_COOKIE_NAME"] = (
-        "entra_auth_" + hashlib.sha256(cookie_scope.encode()).hexdigest()[:12]
-    )
     login_uri = f"{callback_url.scheme}://{callback_url.netloc}/login"
 
     def identity_client(provider):
@@ -154,28 +145,6 @@ def create_app(test_config=None):
     def error_page(message, status):
         return render_template("result.html", error=message), status
 
-    def session_error(stage):
-        cookie_name = app.config["SESSION_COOKIE_NAME"]
-        if cookie_name not in request.cookies:
-            reason = "cookie_not_sent"
-            message = (
-                "認証用 Cookie が送信されていません。アプリの認証ボタンから開始し、"
-                "ブラウザーの Cookie を許可して通常のタブで開いてください。"
-            )
-        elif not session:
-            reason = "invalid_cookie"
-            message = (
-                "認証用 Cookie を復元できません。すべてのプロセスで同じ"
-                " FLASK_SECRET_KEY を使用し、最初から認証してください。"
-            )
-        else:
-            reason = "flow_not_found"
-            message = "認証情報が失われたか処理済みです。最初から認証してください。"
-        app.logger.warning(
-            "Authentication session unavailable: stage=%s reason=%s", stage, reason
-        )
-        return error_page(message, 400)
-
     @app.after_request
     def prevent_caching(response):
         response.headers["Cache-Control"] = "no-store"
@@ -183,7 +152,7 @@ def create_app(test_config=None):
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Content-Security-Policy"] = (
-            "default-src 'none'; style-src 'self'; script-src 'self'; form-action 'self'; "
+            "default-src 'none'; style-src 'self'; form-action 'self'; "
             "frame-ancestors 'none'; base-uri 'none'"
         )
         return response
@@ -203,16 +172,6 @@ def create_app(test_config=None):
 
     @app.get("/login/<provider>")
     def login(provider):
-        if provider not in providers:
-            return error_page("不明な認証先です。", 404)
-        return redirect(f"{login_uri}/{provider}/start")
-
-    @app.get("/login/start")
-    def legacy_start_login():
-        return start_login("entra")
-
-    @app.get("/login/<provider>/start")
-    def start_login(provider):
         if provider not in providers:
             return error_page("不明な認証先です。", 404)
         settings = providers[provider]
@@ -240,58 +199,25 @@ def create_app(test_config=None):
             return error_page("認証 URL を取得できませんでした。", 502)
         session["auth_flow"] = flow
         session["auth_provider"] = provider
-        return redirect(f"{login_uri}/continue")
-
-    @app.get("/login/continue")
-    def continue_login():
-        flow = session.get("auth_flow")
-        if flow is None:
-            return session_error("before_redirect")
         return redirect(flow["auth_uri"])
 
     @app.get("/auth/callback")
     def callback():
-        flow = session.get("auth_flow")
-        if flow is None:
-            if (
-                request.args.get("state")
-                and ("code" in request.args or "error" in request.args)
-                and request.args.get("_cookie_retry") != "1"
-            ):
-                parameters = request.args.to_dict()
-                parameters["_cookie_retry"] = "1"
-                retry_url = f"{url_for('callback')}?{urlencode(parameters)}"
-                # Do not clear a cookie withheld on the cross-site callback.
-                app.logger.warning(
-                    "Authentication cookie unavailable on callback; "
-                    "retrying in first-party context"
-                )
-                return render_template("resume_auth.html", retry_url=retry_url)
-            return session_error("callback")
-
-        if not secrets.compare_digest(
-            request.args.get("state", "").encode(), flow["state"].encode()
+        flow = session.pop("auth_flow", None)
+        provider = session.pop("auth_provider", None)
+        if (
+            flow is None
+            or provider not in providers
+            or not providers[provider]["enabled"]
         ):
-            app.logger.warning("Authentication response rejected: state_mismatch")
+            app.logger.warning("Authentication callback has no active login")
             return error_page(
-                "認証応答の state が一致しません。アプリの認証ボタンから開始してください。",
-                400,
+                "最初の画面の認証ボタンから、もう一度サインインしてください。", 400
             )
 
-        provider = session.get("auth_provider")
-        if provider not in providers or not providers[provider]["enabled"]:
-            app.logger.warning("Authentication response rejected: provider_not_found")
-            return error_page(
-                "認証先の情報がありません。最初の画面から認証し直してください。", 400
-            )
-
-        session.pop("auth_flow")
-        session.pop("auth_provider")
-        auth_response = request.args.to_dict()
-        auth_response.pop("_cookie_retry", None)
         try:
             result = identity_client(provider).acquire_token_by_auth_code_flow(
-                flow, auth_response
+                flow, request.args.to_dict()
             )
         except ValueError:
             return error_page("認証応答を検証できませんでした。最初から認証してください。", 400)
